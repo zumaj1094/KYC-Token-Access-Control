@@ -7,6 +7,10 @@
 (define-constant ERR_INVALID_AMOUNT (err u105))
 (define-constant ERR_SELF_TRANSFER (err u106))
 (define-constant ERR_KYC_REVOKED (err u107))
+(define-constant ERR_VESTING_NOT_FOUND (err u108))
+(define-constant ERR_VESTING_ALREADY_EXISTS (err u109))
+(define-constant ERR_TOKENS_NOT_VESTED (err u110))
+(define-constant ERR_INVALID_VESTING_PARAMS (err u111))
 
 (define-fungible-token kyc-token)
 
@@ -19,6 +23,17 @@
     verification-level: uint,
     verified-at: uint,
     country-code: (string-ascii 3)
+  }
+)
+
+(define-map vesting-schedules 
+  principal 
+  {
+    total-amount: uint,
+    start-block: uint,
+    vesting-period: uint,
+    released-amount: uint,
+    cliff-period: uint
   }
 )
 
@@ -207,6 +222,119 @@
     min-verification-level: (var-get minimum-verification-level),
     contract-owner: CONTRACT_OWNER
   }
+)
+
+(define-public (create-vesting-schedule (beneficiary principal) (total-amount uint) (vesting-period uint) (cliff-period uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> total-amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (> vesting-period u0) ERR_INVALID_VESTING_PARAMS)
+    (asserts! (<= cliff-period vesting-period) ERR_INVALID_VESTING_PARAMS)
+    (asserts! (is-none (map-get? vesting-schedules beneficiary)) ERR_VESTING_ALREADY_EXISTS)
+    (asserts! (default-to false (map-get? kyc-status beneficiary)) ERR_NOT_KYC_VERIFIED)
+    (map-set vesting-schedules beneficiary {
+      total-amount: total-amount,
+      start-block: stacks-block-height,
+      vesting-period: vesting-period,
+      released-amount: u0,
+      cliff-period: cliff-period
+    })
+    (ok true)
+  )
+)
+
+(define-public (release-vested-tokens)
+  (let (
+    (vesting-schedule (map-get? vesting-schedules tx-sender))
+    (releasable-amount (get-releasable-amount tx-sender))
+  )
+    (asserts! (is-some vesting-schedule) ERR_VESTING_NOT_FOUND)
+    (asserts! (> releasable-amount u0) ERR_TOKENS_NOT_VESTED)
+    (let (
+      (schedule (unwrap-panic vesting-schedule))
+      (new-released-amount (+ (get released-amount schedule) releasable-amount))
+    )
+      (try! (ft-mint? kyc-token releasable-amount tx-sender))
+      (map-set token-balances tx-sender 
+        (+ (default-to u0 (map-get? token-balances tx-sender)) releasable-amount))
+      (map-set vesting-schedules tx-sender (merge schedule {released-amount: new-released-amount}))
+      (var-set total-supply (+ (var-get total-supply) releasable-amount))
+      (ok releasable-amount)
+    )
+  )
+)
+
+(define-read-only (get-vesting-schedule (beneficiary principal))
+  (map-get? vesting-schedules beneficiary)
+)
+
+(define-read-only (get-releasable-amount (beneficiary principal))
+  (let (
+    (vesting-schedule (map-get? vesting-schedules beneficiary))
+  )
+    (if (is-some vesting-schedule)
+      (let (
+        (schedule (unwrap-panic vesting-schedule))
+        (current-block stacks-block-height)
+        (start-block (get start-block schedule))
+        (vesting-period (get vesting-period schedule))
+        (cliff-period (get cliff-period schedule))
+        (total-amount (get total-amount schedule))
+        (released-amount (get released-amount schedule))
+        (elapsed-blocks (- current-block start-block))
+      )
+        (if (< elapsed-blocks cliff-period)
+          u0
+          (let (
+            (vested-amount (if (>= elapsed-blocks vesting-period)
+                            total-amount
+                            (/ (* total-amount elapsed-blocks) vesting-period)
+                          ))
+          )
+            (if (> vested-amount released-amount)
+              (- vested-amount released-amount)
+              u0
+            )
+          )
+        )
+      )
+      u0
+    )
+  )
+)
+
+(define-read-only (get-vesting-info (beneficiary principal))
+  (let (
+    (vesting-schedule (map-get? vesting-schedules beneficiary))
+  )
+    (if (is-some vesting-schedule)
+      (let (
+        (schedule (unwrap-panic vesting-schedule))
+        (releasable (get-releasable-amount beneficiary))
+        (current-block stacks-block-height)
+        (start-block (get start-block schedule))
+        (vesting-period (get vesting-period schedule))
+        (cliff-period (get cliff-period schedule))
+        (total-amount (get total-amount schedule))
+        (released-amount (get released-amount schedule))
+        (elapsed-blocks (- current-block start-block))
+      )
+        (some {
+          total-amount: total-amount,
+          released-amount: released-amount,
+          releasable-amount: releasable,
+          remaining-amount: (- total-amount released-amount),
+          start-block: start-block,
+          vesting-period: vesting-period,
+          cliff-period: cliff-period,
+          elapsed-blocks: elapsed-blocks,
+          is-cliff-passed: (>= elapsed-blocks cliff-period),
+          is-fully-vested: (>= elapsed-blocks vesting-period)
+        })
+      )
+      none
+    )
+  )
 )
 
 (map-set kyc-verifiers CONTRACT_OWNER true)
