@@ -11,6 +11,10 @@
 (define-constant ERR_VESTING_ALREADY_EXISTS (err u109))
 (define-constant ERR_TOKENS_NOT_VESTED (err u110))
 (define-constant ERR_INVALID_VESTING_PARAMS (err u111))
+(define-constant ERR_INSUFFICIENT_STAKE_BALANCE (err u112))
+(define-constant ERR_STAKE_NOT_FOUND (err u113))
+(define-constant ERR_STAKE_STILL_LOCKED (err u114))
+(define-constant ERR_INVALID_STAKE_PERIOD (err u115))
 
 (define-fungible-token kyc-token)
 
@@ -37,9 +41,21 @@
   }
 )
 
+(define-map token-stakes 
+  principal 
+  {
+    staked-amount: uint,
+    stake-start-block: uint,
+    stake-period: uint,
+    reward-rate: uint
+  }
+)
+
 (define-data-var total-supply uint u0)
 (define-data-var kyc-required-for-transfers bool true)
 (define-data-var minimum-verification-level uint u1)
+(define-data-var total-staked uint u0)
+(define-data-var base-reward-rate uint u100)
 
 (define-public (add-kyc-verifier (verifier principal))
   (begin
@@ -335,6 +351,129 @@
       none
     )
   )
+)
+
+(define-public (stake-tokens (amount uint) (stake-period uint))
+  (let (
+    (user-balance (default-to u0 (map-get? token-balances tx-sender)))
+    (existing-stake (map-get? token-stakes tx-sender))
+    (reward-rate (var-get base-reward-rate))
+  )
+    (asserts! (default-to false (map-get? kyc-status tx-sender)) ERR_NOT_KYC_VERIFIED)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (>= user-balance amount) ERR_INSUFFICIENT_STAKE_BALANCE)
+    (asserts! (>= stake-period u144) ERR_INVALID_STAKE_PERIOD)
+    (asserts! (is-none existing-stake) ERR_VESTING_ALREADY_EXISTS)
+    (try! (ft-burn? kyc-token amount tx-sender))
+    (map-set token-balances tx-sender (- user-balance amount))
+    (map-set token-stakes tx-sender {
+      staked-amount: amount,
+      stake-start-block: stacks-block-height,
+      stake-period: stake-period,
+      reward-rate: reward-rate
+    })
+    (var-set total-staked (+ (var-get total-staked) amount))
+    (var-set total-supply (- (var-get total-supply) amount))
+    (ok true)
+  )
+)
+
+(define-public (unstake-tokens)
+  (let (
+    (stake-info (map-get? token-stakes tx-sender))
+    (rewards (get-pending-rewards tx-sender))
+  )
+    (asserts! (is-some stake-info) ERR_STAKE_NOT_FOUND)
+    (let (
+      (stake (unwrap-panic stake-info))
+      (current-block stacks-block-height)
+      (stake-end-block (+ (get stake-start-block stake) (get stake-period stake)))
+      (staked-amount (get staked-amount stake))
+      (total-return (+ staked-amount rewards))
+    )
+      (asserts! (>= current-block stake-end-block) ERR_STAKE_STILL_LOCKED)
+      (try! (ft-mint? kyc-token total-return tx-sender))
+      (map-set token-balances tx-sender 
+        (+ (default-to u0 (map-get? token-balances tx-sender)) total-return))
+      (map-delete token-stakes tx-sender)
+      (var-set total-staked (- (var-get total-staked) staked-amount))
+      (var-set total-supply (+ (var-get total-supply) total-return))
+      (ok total-return)
+    )
+  )
+)
+
+(define-public (set-base-reward-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (> new-rate u0) ERR_INVALID_AMOUNT)
+    (var-set base-reward-rate new-rate)
+    (ok true)
+  )
+)
+
+(define-read-only (get-stake-info (staker principal))
+  (let (
+    (stake-info (map-get? token-stakes staker))
+  )
+    (if (is-some stake-info)
+      (let (
+        (stake (unwrap-panic stake-info))
+        (current-block stacks-block-height)
+        (stake-start-block (get stake-start-block stake))
+        (stake-period (get stake-period stake))
+        (stake-end-block (+ stake-start-block stake-period))
+        (staked-amount (get staked-amount stake))
+        (reward-rate (get reward-rate stake))
+        (pending-rewards (get-pending-rewards staker))
+        (elapsed-blocks (- current-block stake-start-block))
+      )
+        (some {
+          staked-amount: staked-amount,
+          stake-start-block: stake-start-block,
+          stake-period: stake-period,
+          stake-end-block: stake-end-block,
+          reward-rate: reward-rate,
+          pending-rewards: pending-rewards,
+          elapsed-blocks: elapsed-blocks,
+          is-unlocked: (>= current-block stake-end-block),
+          total-return: (+ staked-amount pending-rewards)
+        })
+      )
+      none
+    )
+  )
+)
+
+(define-read-only (get-pending-rewards (staker principal))
+  (let (
+    (stake-info (map-get? token-stakes staker))
+  )
+    (if (is-some stake-info)
+      (let (
+        (stake (unwrap-panic stake-info))
+        (current-block stacks-block-height)
+        (stake-start-block (get stake-start-block stake))
+        (stake-period (get stake-period stake))
+        (staked-amount (get staked-amount stake))
+        (reward-rate (get reward-rate stake))
+        (elapsed-blocks (- current-block stake-start-block))
+        (effective-period (if (> elapsed-blocks stake-period) stake-period elapsed-blocks))
+      )
+        (/ (* (* staked-amount reward-rate) effective-period) (* u10000 u144))
+      )
+      u0
+    )
+  )
+)
+
+(define-read-only (get-staking-stats)
+  {
+    total-staked: (var-get total-staked),
+    base-reward-rate: (var-get base-reward-rate),
+    total-supply: (var-get total-supply),
+    circulating-supply: (- (var-get total-supply) (var-get total-staked))
+  }
 )
 
 (map-set kyc-verifiers CONTRACT_OWNER true)
