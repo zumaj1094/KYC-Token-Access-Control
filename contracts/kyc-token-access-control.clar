@@ -15,6 +15,9 @@
 (define-constant ERR_STAKE_NOT_FOUND (err u113))
 (define-constant ERR_STAKE_STILL_LOCKED (err u114))
 (define-constant ERR_INVALID_STAKE_PERIOD (err u115))
+(define-constant ERR_ACCOUNT_FROZEN (err u116))
+(define-constant ERR_ACCOUNT_NOT_FROZEN (err u117))
+(define-constant ERR_CANNOT_FREEZE_OWNER (err u118))
 
 (define-fungible-token kyc-token)
 
@@ -48,6 +51,15 @@
     stake-start-block: uint,
     stake-period: uint,
     reward-rate: uint
+  }
+)
+
+(define-map frozen-accounts 
+  principal 
+  {
+    frozen-at: uint,
+    reason: (string-ascii 128),
+    frozen-by: principal
   }
 )
 
@@ -116,6 +128,8 @@
     (asserts! (not (is-eq tx-sender recipient)) ERR_SELF_TRANSFER)
     (asserts! (> amount u0) ERR_INVALID_AMOUNT)
     (asserts! (>= sender-balance amount) ERR_INSUFFICIENT_BALANCE)
+    (asserts! (is-none (map-get? frozen-accounts tx-sender)) ERR_ACCOUNT_FROZEN)
+    (asserts! (is-none (map-get? frozen-accounts recipient)) ERR_ACCOUNT_FROZEN)
     (if (var-get kyc-required-for-transfers)
       (begin
         (asserts! (default-to false (map-get? kyc-status tx-sender)) ERR_NOT_KYC_VERIFIED)
@@ -360,6 +374,7 @@
     (reward-rate (var-get base-reward-rate))
   )
     (asserts! (default-to false (map-get? kyc-status tx-sender)) ERR_NOT_KYC_VERIFIED)
+    (asserts! (is-none (map-get? frozen-accounts tx-sender)) ERR_ACCOUNT_FROZEN)
     (asserts! (> amount u0) ERR_INVALID_AMOUNT)
     (asserts! (>= user-balance amount) ERR_INSUFFICIENT_STAKE_BALANCE)
     (asserts! (>= stake-period u144) ERR_INVALID_STAKE_PERIOD)
@@ -474,6 +489,67 @@
     total-supply: (var-get total-supply),
     circulating-supply: (- (var-get total-supply) (var-get total-staked))
   }
+)
+
+(define-public (freeze-account (account principal) (reason (string-ascii 128)))
+  (begin
+    (asserts! (or (is-eq tx-sender CONTRACT_OWNER) (default-to false (map-get? kyc-verifiers tx-sender))) ERR_UNAUTHORIZED)
+    (asserts! (not (is-eq account CONTRACT_OWNER)) ERR_CANNOT_FREEZE_OWNER)
+    (asserts! (is-none (map-get? frozen-accounts account)) ERR_VESTING_ALREADY_EXISTS)
+    (map-set frozen-accounts account {
+      frozen-at: stacks-block-height,
+      reason: reason,
+      frozen-by: tx-sender
+    })
+    (var-set frozen-accounts-count (+ (var-get frozen-accounts-count) u1))
+    (ok true)
+  )
+)
+
+(define-public (unfreeze-account (account principal))
+  (begin
+    (asserts! (or (is-eq tx-sender CONTRACT_OWNER) (default-to false (map-get? kyc-verifiers tx-sender))) ERR_UNAUTHORIZED)
+    (asserts! (is-some (map-get? frozen-accounts account)) ERR_ACCOUNT_NOT_FROZEN)
+    (map-delete frozen-accounts account)
+    (var-set frozen-accounts-count (- (var-get frozen-accounts-count) u1))
+    (ok true)
+  )
+)
+
+(define-read-only (is-account-frozen (account principal))
+  (is-some (map-get? frozen-accounts account))
+)
+
+(define-read-only (get-freeze-info (account principal))
+  (let (
+    (freeze-info (map-get? frozen-accounts account))
+  )
+    (if (is-some freeze-info)
+      (let (
+        (info (unwrap-panic freeze-info))
+        (current-block stacks-block-height)
+        (frozen-at (get frozen-at info))
+        (reason (get reason info))
+        (frozen-by (get frozen-by info))
+        (frozen-duration (- current-block frozen-at))
+      )
+        (some {
+          frozen-at: frozen-at,
+          reason: reason,
+          frozen-by: frozen-by,
+          frozen-duration: frozen-duration,
+          current-block: current-block
+        })
+      )
+      none
+    )
+  )
+)
+
+(define-data-var frozen-accounts-count uint u0)
+
+(define-read-only (get-frozen-accounts-count)
+  (var-get frozen-accounts-count)
 )
 
 (map-set kyc-verifiers CONTRACT_OWNER true)
