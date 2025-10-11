@@ -18,6 +18,8 @@
 (define-constant ERR_ACCOUNT_FROZEN (err u116))
 (define-constant ERR_ACCOUNT_NOT_FROZEN (err u117))
 (define-constant ERR_CANNOT_FREEZE_OWNER (err u118))
+(define-constant ERR_INSUFFICIENT_ALLOWANCE (err u119))
+(define-constant ERR_INVALID_SPENDER (err u120))
 
 (define-fungible-token kyc-token)
 
@@ -61,6 +63,11 @@
     reason: (string-ascii 128),
     frozen-by: principal
   }
+)
+
+(define-map token-allowances 
+  {owner: principal, spender: principal} 
+  uint
 )
 
 (define-data-var total-supply uint u0)
@@ -550,6 +557,89 @@
 
 (define-read-only (get-frozen-accounts-count)
   (var-get frozen-accounts-count)
+)
+
+(define-public (approve (spender principal) (amount uint))
+  (begin
+    (asserts! (not (is-eq tx-sender spender)) ERR_INVALID_SPENDER)
+    (asserts! (default-to false (map-get? kyc-status tx-sender)) ERR_NOT_KYC_VERIFIED)
+    (asserts! (default-to false (map-get? kyc-status spender)) ERR_NOT_KYC_VERIFIED)
+    (asserts! (is-none (map-get? frozen-accounts tx-sender)) ERR_ACCOUNT_FROZEN)
+    (asserts! (is-none (map-get? frozen-accounts spender)) ERR_ACCOUNT_FROZEN)
+    (map-set token-allowances {owner: tx-sender, spender: spender} amount)
+    (ok true)
+  )
+)
+
+(define-public (increase-allowance (spender principal) (increment uint))
+  (let (
+    (current-allowance (default-to u0 (map-get? token-allowances {owner: tx-sender, spender: spender})))
+  )
+    (asserts! (not (is-eq tx-sender spender)) ERR_INVALID_SPENDER)
+    (asserts! (> increment u0) ERR_INVALID_AMOUNT)
+    (asserts! (is-none (map-get? frozen-accounts tx-sender)) ERR_ACCOUNT_FROZEN)
+    (asserts! (is-none (map-get? frozen-accounts spender)) ERR_ACCOUNT_FROZEN)
+    (map-set token-allowances {owner: tx-sender, spender: spender} (+ current-allowance increment))
+    (ok true)
+  )
+)
+
+(define-public (decrease-allowance (spender principal) (decrement uint))
+  (let (
+    (current-allowance (default-to u0 (map-get? token-allowances {owner: tx-sender, spender: spender})))
+  )
+    (asserts! (not (is-eq tx-sender spender)) ERR_INVALID_SPENDER)
+    (asserts! (> decrement u0) ERR_INVALID_AMOUNT)
+    (asserts! (>= current-allowance decrement) ERR_INSUFFICIENT_ALLOWANCE)
+    (asserts! (is-none (map-get? frozen-accounts tx-sender)) ERR_ACCOUNT_FROZEN)
+    (map-set token-allowances {owner: tx-sender, spender: spender} (- current-allowance decrement))
+    (ok true)
+  )
+)
+
+(define-public (transfer-from (owner principal) (recipient principal) (amount uint))
+  (let (
+    (current-allowance (default-to u0 (map-get? token-allowances {owner: owner, spender: tx-sender})))
+    (owner-balance (default-to u0 (map-get? token-balances owner)))
+    (recipient-balance (default-to u0 (map-get? token-balances recipient)))
+  )
+    (asserts! (not (is-eq owner recipient)) ERR_SELF_TRANSFER)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (>= current-allowance amount) ERR_INSUFFICIENT_ALLOWANCE)
+    (asserts! (>= owner-balance amount) ERR_INSUFFICIENT_BALANCE)
+    (asserts! (is-none (map-get? frozen-accounts owner)) ERR_ACCOUNT_FROZEN)
+    (asserts! (is-none (map-get? frozen-accounts recipient)) ERR_ACCOUNT_FROZEN)
+    (asserts! (is-none (map-get? frozen-accounts tx-sender)) ERR_ACCOUNT_FROZEN)
+    (if (var-get kyc-required-for-transfers)
+      (begin
+        (asserts! (default-to false (map-get? kyc-status owner)) ERR_NOT_KYC_VERIFIED)
+        (asserts! (default-to false (map-get? kyc-status recipient)) ERR_NOT_KYC_VERIFIED)
+        (asserts! (default-to false (map-get? kyc-status tx-sender)) ERR_NOT_KYC_VERIFIED)
+        true
+      )
+      true
+    )
+    (try! (ft-transfer? kyc-token amount owner recipient))
+    (map-set token-balances owner (- owner-balance amount))
+    (map-set token-balances recipient (+ recipient-balance amount))
+    (map-set token-allowances {owner: owner, spender: tx-sender} (- current-allowance amount))
+    (ok true)
+  )
+)
+
+(define-public (revoke-allowance (spender principal))
+  (begin
+    (map-delete token-allowances {owner: tx-sender, spender: spender})
+    (ok true)
+  )
+)
+
+(define-read-only (get-allowance (owner principal) (spender principal))
+  (default-to u0 (map-get? token-allowances {owner: owner, spender: spender}))
+)
+
+(define-read-only (has-allowance (owner principal) (spender principal))
+  (> (default-to u0 (map-get? token-allowances {owner: owner, spender: spender})) u0)
 )
 
 (map-set kyc-verifiers CONTRACT_OWNER true)
