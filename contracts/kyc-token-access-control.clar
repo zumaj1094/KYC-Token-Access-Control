@@ -185,6 +185,35 @@
   )
 )
 
+(define-public (bulk-mint (recipients (list 50 {recipient: principal, amount: uint})))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (fold process-bulk-mint recipients (ok u0))
+  )
+)
+
+(define-private (process-bulk-mint 
+  (mint-data {recipient: principal, amount: uint}) 
+  (previous-result (response uint uint))
+)
+  (match previous-result
+    success 
+      (let (
+        (recipient (get recipient mint-data))
+        (amount (get amount mint-data))
+        (current-balance (default-to u0 (map-get? token-balances recipient)))
+      )
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+        (asserts! (default-to false (map-get? kyc-status recipient)) ERR_NOT_KYC_VERIFIED)
+        (try! (ft-mint? kyc-token amount recipient))
+        (map-set token-balances recipient (+ current-balance amount))
+        (var-set total-supply (+ (var-get total-supply) amount))
+        (ok (+ success u1))
+      )
+    error (err error)
+  )
+)
+
 (define-public (set-kyc-requirement (required bool))
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
